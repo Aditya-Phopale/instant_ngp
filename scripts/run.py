@@ -14,6 +14,9 @@ import commentjson as json
 
 import numpy as np
 
+import orjson
+import torch
+
 import shutil
 import time
 
@@ -28,6 +31,7 @@ def parse_args():
 	parser = argparse.ArgumentParser(description="Run instant neural graphics primitives with additional configuration & output options")
 
 	parser.add_argument("files", nargs="*", help="Files to be loaded. Can be a scene, network config, snapshot, camera path, or a combination of those.")
+	parser.add_argument("--save_dir", default="", help="save dir for saving rendered RGB vals from test transform file")
 
 	parser.add_argument("--scene", "--training_data", default="", help="The scene to load. Can be the scene's name or a full path to the training data. Can be NeRF dataset, a *.obj/*.stl mesh for training a SDF, an image, or a *.nvdb volume.")
 	parser.add_argument("--mode", default="", type=str, help=argparse.SUPPRESS) # deprecated
@@ -209,8 +213,10 @@ if __name__ == "__main__":
 
 	if args.test_transforms:
 		print("Evaluating test transforms from ", args.test_transforms)
-		with open(args.test_transforms) as f:
-			test_transforms = json.load(f)
+		
+		with open(args.test_transforms, 'rb') as f:  # Use 'rb' mode for orjson
+			test_transforms = orjson.loads(f.read())
+
 		data_dir=os.path.dirname(args.test_transforms)
 		totmse = 0
 		totpsnr = 0
@@ -230,42 +236,69 @@ if __name__ == "__main__":
 		testbed.nerf.render_min_transmittance = 1e-4
 
 		testbed.shall_train = False
-		testbed.load_training_data(args.test_transforms)
+		testbed.fov = np.degrees(test_transforms["camera_angle_x"])
+				
 
-		with tqdm(range(testbed.nerf.training.dataset.n_images), unit="images", desc=f"Rendering test frame") as t:
-			for i in t:
-				resolution = testbed.nerf.training.dataset.metadata[i].resolution
-				testbed.render_ground_truth = True
-				testbed.set_camera_to_training_view(i)
-				ref_image = testbed.render(resolution[0], resolution[1], 1, True)
+		# Move all transforms to GPU at once
+		num_frames = len(test_transforms["frames"])
+		# res_vals = [512,512]
+
+		# Set the precision for tensors
+		precision = torch.float16
+
+
+
+		############# METHOD2:  Batch process on GPU ############################
+		# Threshold for color conversion
+		limit = 0.0031308  
+
+		# Preallocate arrays
+		batch_size = 1024  # Adjust batch size based on GPU memory
+		# image_tensors = torch.zeros((min(batch_size, num_frames), res_vals[0], res_vals[1], 3), dtype=torch.uint8, device="cuda")
+		out_vals_arr = torch.zeros((num_frames, 1, 1, 3), dtype=torch.uint8, device="cuda")
+
+		# Function for sRGB to linear conversion (fused ops for efficiency)
+		def srgb_to_linear(tensor):
+			tensor = torch.where(
+				tensor > limit,
+				1.055 * torch.pow(tensor, 1.0 / 2.4) - 0.055,
+				12.92 * tensor
+			)
+			return torch.clamp(tensor, 0.0, 1.0) * 255.0 + 0.5
+
+		# Process in batches
+		num_batches = (num_frames + batch_size - 1) // batch_size  # Calculate the number of batches
+
+		for batch_idx in tqdm(range(num_batches)):
+			# Calculate start and end indices for this batch
+			start_idx = batch_idx * batch_size
+			end_idx = min((batch_idx + 1) * batch_size, num_frames)
+			batch_size_actual = end_idx - start_idx
+
+			# Preallocate batch tensors
+			batch_out_vals = torch.zeros((batch_size_actual, 1, 1, 3), device="cuda", dtype=precision)
+
+			for i, frame_idx in enumerate(range(start_idx, end_idx)):
+				# Extract and set the camera matrix
+				cam_matrix = test_transforms["frames"][frame_idx]["transform_matrix"]
+				testbed.set_nerf_camera_matrix(np.matrix(cam_matrix)[:-1, :])
 				testbed.render_ground_truth = False
-				image = testbed.render(resolution[0], resolution[1], spp, True)
 
-				if i == 0:
-					write_image(f"ref.png", ref_image)
-					write_image(f"out.png", image)
+				# Render the 1x1 output values
+				out_vals = torch.tensor(
+					testbed.render(1, 1, spp, True)[:, :, :3],
+					device="cuda",
+					dtype=precision
+				)
+				batch_out_vals[i] = out_vals
 
-					diffimg = np.absolute(image - ref_image)
-					diffimg[...,3:4] = 1.0
-					write_image("diff.png", diffimg)
+			# Apply sRGB to linear conversion for the entire batch
+			batch_out_vals = srgb_to_linear(batch_out_vals)
+			out_vals_arr[start_idx:end_idx] = batch_out_vals.to(dtype=torch.uint8)
 
-				A = np.clip(linear_to_srgb(image[...,:3]), 0.0, 1.0)
-				R = np.clip(linear_to_srgb(ref_image[...,:3]), 0.0, 1.0)
-				mse = float(compute_error("MSE", A, R))
-				ssim = float(compute_error("SSIM", A, R))
-				totssim += ssim
-				totmse += mse
-				psnr = mse2psnr(mse)
-				totpsnr += psnr
-				minpsnr = psnr if psnr<minpsnr else minpsnr
-				maxpsnr = psnr if psnr>maxpsnr else maxpsnr
-				totcount = totcount+1
-				t.set_postfix(psnr = totpsnr/(totcount or 1))
-
-		psnr_avgmse = mse2psnr(totmse/(totcount or 1))
-		psnr = totpsnr/(totcount or 1)
-		ssim = totssim/(totcount or 1)
-		print(f"PSNR={psnr} [min={minpsnr} max={maxpsnr}] SSIM={ssim}")
+		# Save output values
+		os.makedirs(os.path.dirname(args.save_dir), exist_ok=True)
+		torch.save(out_vals_arr, args.save_dir)
 
 	if args.save_mesh:
 		res = args.marching_cubes_res or 256
