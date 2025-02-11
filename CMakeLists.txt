@@ -8,7 +8,7 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-project(instant-ngp
+project(instant_ngp
 	VERSION 1.0
 	DESCRIPTION "Instant Neural Graphics Primitives"
 	LANGUAGES C CXX CUDA
@@ -19,10 +19,10 @@ if (NOT NGP_DEPLOY)
 	set(NGP_VERSION "${NGP_VERSION}dev")
 endif()
 
-option(NGP_BUILD_EXECUTABLE "Build instant-ngp.exe?" ON)
+option(NGP_BUILD_EXECUTABLE "Build instant_ngp.exe?" ON)
 option(NGP_BUILD_WITH_GUI "Build with GUI support (requires GLFW and GLEW)?" ON)
 option(NGP_BUILD_WITH_OPTIX "Build with OptiX to enable hardware ray tracing?" ON)
-option(NGP_BUILD_WITH_PYTHON_BINDINGS "Build bindings that allow instrumenting instant-ngp with Python?" ON)
+option(NGP_BUILD_WITH_PYTHON_BINDINGS "Build bindings that allow instrumenting instant_ngp with Python?" ON)
 option(NGP_BUILD_WITH_VULKAN "Build with Vulkan to enable DLSS support?" ON)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
@@ -40,7 +40,7 @@ endif()
 
 if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/glfw/CMakeLists.txt")
 	message(FATAL_ERROR
-		"Some instant-ngp dependencies are missing. "
+		"Some instant_ngp dependencies are missing. "
 		"If you forgot the \"--recursive\" flag when cloning this project, "
 		"this can be fixed by calling \"git submodule update --init --recursive\"."
 	)
@@ -354,25 +354,25 @@ if (MSVC)
 endif()
 
 if (NGP_BUILD_EXECUTABLE)
-	add_executable(instant-ngp src/main.cu)
-	target_link_libraries(instant-ngp PRIVATE ngp)
+	add_executable(instant_ngp src/main.cu)
+	target_link_libraries(instant_ngp PRIVATE ngp)
 
-	# Link the executable to the project directory and copy over DLLs such that instant-ngp can be invoked without going into the build folder.
-	set(NGP_BINARY_FILE "\"${CMAKE_CURRENT_SOURCE_DIR}/$<TARGET_FILE_NAME:instant-ngp>\"")
+	# Link the executable to the project directory and copy over DLLs such that instant_ngp can be invoked without going into the build folder.
+	set(NGP_BINARY_FILE "\"${CMAKE_CURRENT_SOURCE_DIR}/$<TARGET_FILE_NAME:instant_ngp>\"")
 	if (MSVC)
-		add_custom_command(TARGET instant-ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:instant-ngp> ${CMAKE_CURRENT_SOURCE_DIR})
+		add_custom_command(TARGET instant_ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:instant_ngp> ${CMAKE_CURRENT_SOURCE_DIR})
 		file(GLOB NGP_REQUIRED_DLLS "${CUDA_COMPILER_BIN}/cudart64*.dll")
 		if (NGP_VULKAN)
 			list(APPEND NGP_REQUIRED_DLLS "${NGX_SHARED_LIB}")
 		endif()
 		if (NGP_REQUIRED_DLLS)
-			add_custom_command(TARGET instant-ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy ${NGP_REQUIRED_DLLS} ${CMAKE_CURRENT_SOURCE_DIR} COMMAND_EXPAND_LISTS)
+			add_custom_command(TARGET instant_ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy ${NGP_REQUIRED_DLLS} ${CMAKE_CURRENT_SOURCE_DIR} COMMAND_EXPAND_LISTS)
 		endif()
 	else()
-		add_custom_command(TARGET instant-ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:instant-ngp> "${NGP_BINARY_FILE}")
+		add_custom_command(TARGET instant_ngp POST_BUILD COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:instant_ngp> "${NGP_BINARY_FILE}")
 
 		if (NGP_VULKAN)
-			add_custom_command(TARGET instant-ngp POST_BUILD COMMAND "ln" -s -f "${NGX_SHARED_LIB}" "${CMAKE_CURRENT_SOURCE_DIR}/")
+			add_custom_command(TARGET instant_ngp POST_BUILD COMMAND "ln" -s -f "${NGX_SHARED_LIB}" "${CMAKE_CURRENT_SOURCE_DIR}/")
 		endif()
 	endif()
 endif(NGP_BUILD_EXECUTABLE)
