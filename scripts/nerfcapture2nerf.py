@@ -17,7 +17,7 @@ from cyclonedds.sub import DataReader
 from cyclonedds.topic import Topic
 from cyclonedds.util import duration
 
-from common import *
+from instant_ngp.scripts.common import *
 import pyngp as ngp  # noqa
 
 def parse_args():

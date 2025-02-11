@@ -35,8 +35,8 @@
 
 import numpy as np
 
-from flip import compute_flip
-from utils import *
+from instant_ngp.scripts.flip import compute_flip
+from instant_ngp.scripts.flip.utils import *
 
 if __name__ == '__main__':
 	# Set viewing conditions

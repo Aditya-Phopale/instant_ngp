@@ -10,7 +10,7 @@
 
 import os
 
-from common import *
+from instant_ngp.scripts.common import *
 
 def ours_real_converted(path, frameidx):
 	return {
