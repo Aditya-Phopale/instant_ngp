@@ -253,9 +253,10 @@ if __name__ == "__main__":
 		limit = 0.0031308  
 
 		# Preallocate arrays
-		batch_size = 1024  # Adjust batch size based on GPU memory
+		# batch_size = 1024  # Adjust batch size based on GPU memory
+		batch_size = 10000
 		# image_tensors = torch.zeros((min(batch_size, num_frames), res_vals[0], res_vals[1], 3), dtype=torch.uint8, device="cuda")
-		out_vals_arr = torch.zeros((num_frames, 1,1,3), dtype=torch.uint8, device="cuda")
+		out_vals_arr = torch.zeros((num_frames, 1, 1, 3), dtype=torch.uint8, device="cuda")
 
 		# Function for sRGB to linear conversion (fused ops for efficiency)
 		def srgb_to_linear(tensor):
@@ -269,32 +270,32 @@ if __name__ == "__main__":
 		# Process in batches
 		num_batches = (num_frames + batch_size - 1) // batch_size  # Calculate the number of batches
 
-		for batch_idx in tqdm(range(num_batches)):
+		# for batch_idx in tqdm(range(num_batches)):
+		for batch_idx in tqdm(range(num_batches)):      ################ Do something for the last batch
 			# Calculate start and end indices for this batch
 			start_idx = batch_idx * batch_size
 			end_idx = min((batch_idx + 1) * batch_size, num_frames)
 			batch_size_actual = end_idx - start_idx
 
+			print(start_idx, end_idx, batch_size_actual)
 			# Preallocate batch tensors
-			batch_out_vals = torch.zeros((batch_size_actual, 1,1,3), device="cuda", dtype=precision)
+			batch_out_vals = torch.zeros((batch_size_actual, 1, 1, 3), device="cuda", dtype=precision)
 
-			for i, frame_idx in enumerate(range(start_idx, end_idx)):
-				# Extract and set the camera matrix
-				cam_matrix = test_transforms["frames"][frame_idx]["transform_matrix"]
-				testbed.set_nerf_camera_matrix(np.matrix(cam_matrix)[:-1, :])
-				testbed.render_ground_truth = False
+			cam_matrix_slice = test_transforms["frames"][start_idx:end_idx]
+			cam_matrix_list = [np.matrix(matrix["transform_matrix"])[:-1,:] for matrix in cam_matrix_slice]
 
-				# Render the 1x1 output values
-				out_vals = torch.tensor(
-					testbed.render(1, 1, spp, True)[:, :, :3],
-					device="cuda",
-					dtype=precision
-				)
-				batch_out_vals[i] = out_vals
+			# Render the 1x1 output values
+			out_vals = torch.tensor(
+				testbed.render_parallel(100, 100, spp, True, cam_matrix_list)[:, :, :3],
+				device="cuda",
+				dtype=precision
+			)
+			# batch_out_vals = out_vals
 
 			# Apply sRGB to linear conversion for the entire batch
-			batch_out_vals = srgb_to_linear(batch_out_vals)
-			out_vals_arr[start_idx:end_idx] = batch_out_vals.to(dtype=torch.uint8)
+			batch_out_vals = srgb_to_linear(out_vals)
+			batch_out_vals = batch_out_vals.reshape(batch_size ,1 ,1 ,3)
+			out_vals_arr[start_idx:end_idx] = batch_out_vals[:batch_size_actual].to(dtype=torch.uint8)
 
 		# Save output values
 		os.makedirs(os.path.dirname(args.save_dir), exist_ok=True)

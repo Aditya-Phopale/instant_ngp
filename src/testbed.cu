@@ -402,6 +402,10 @@ void Testbed::set_nerf_camera_matrix(const mat4x3& cam) {
 	m_camera = m_nerf.training.dataset.nerf_matrix_to_ngp(cam);
 }
 
+mat4x3 Testbed::set_nerf_camera_matrix_copy(const mat4x3& cam) {
+	return m_nerf.training.dataset.nerf_matrix_to_ngp(cam);
+}
+
 vec3 Testbed::look_at() const {
 	return view_pos() + view_dir() * m_scale;
 }
@@ -4294,6 +4298,35 @@ void Testbed::render_frame(
 	render_frame_epilogue(stream, camera_matrix0, prev_camera_matrix, orig_screen_center, relative_focal_length, foveation, prev_foveation, render_buffer, to_srgb);
 }
 
+void Testbed::render_frame_parallel(
+	cudaStream_t stream,
+	const std::vector<mat4x3>& camera_matrix0,
+	const std::vector<mat4x3>& camera_matrix1,
+	const std::vector<mat4x3>& prev_camera_matrix,
+	const vec2& orig_screen_center,
+	const vec2& relative_focal_length,
+	const vec4& nerf_rolling_shutter,
+	const Foveation& foveation,
+	const Foveation& prev_foveation,
+	int visualized_dimension,
+	CudaRenderBuffer& render_buffer,
+	bool to_srgb,
+	CudaDevice* device
+) {
+	if (!device) {
+		device = &primary_device();
+	}
+	sync_device(render_buffer, *device);
+
+	{
+		auto device_guard = use_device(stream, render_buffer, *device);
+		render_frame_main(*device, camera_matrix0, camera_matrix1, orig_screen_center, relative_focal_length, nerf_rolling_shutter, foveation, visualized_dimension);
+	}
+
+	render_frame_epilogue(stream, camera_matrix0, prev_camera_matrix, orig_screen_center, relative_focal_length, foveation, prev_foveation, render_buffer, to_srgb);
+}
+
+
 void Testbed::render_frame_main(
 	CudaDevice& device,
 	const mat4x3& camera_matrix0,
@@ -4402,6 +4435,38 @@ void Testbed::render_frame_main(
 			break;
 		case ETestbedMode::Volume:
 			render_volume(device.stream(), device.render_buffer_view(), focal_length, camera_matrix0, screen_center, foveation);
+			break;
+		default:
+			// No-op if no mode is active
+			break;
+	}
+}
+
+void Testbed::render_frame_main(
+	CudaDevice& device,
+	const std::vector<mat4x3>& camera_matrix0,
+	const std::vector<mat4x3>& camera_matrix1,
+	const vec2& orig_screen_center,
+	const vec2& relative_focal_length,
+	const vec4& nerf_rolling_shutter,
+	const Foveation& foveation,
+	int visualized_dimension
+) {
+	device.render_buffer_view().clear(device.stream());
+
+	if (!m_network) {
+		return;
+	}
+
+	ivec2 res = {1,1};
+	vec2 focal_length = calc_focal_length(res, relative_focal_length, m_fov_axis, m_zoom);
+	vec2 screen_center = render_screen_center(orig_screen_center);
+
+	switch (m_testbed_mode) {
+		case ETestbedMode::Nerf:
+			if (!m_render_ground_truth || m_ground_truth_alpha < 1.0f) {
+				render_nerf(device.stream(), device, device.render_buffer_view(), device.nerf_network(), device.data().density_grid_bitfield_ptr, focal_length, camera_matrix0, camera_matrix1, nerf_rolling_shutter, screen_center, foveation, visualized_dimension);
+			}
 			break;
 		default:
 			// No-op if no mode is active
@@ -4572,6 +4637,173 @@ void Testbed::render_frame_epilogue(
 	}
 #endif
 }
+
+void Testbed::render_frame_epilogue(
+	cudaStream_t stream,
+	const std::vector<mat4x3>& camera_matrix0,
+	const std::vector<mat4x3>& prev_camera_matrix,
+	const vec2& orig_screen_center,
+	const vec2& relative_focal_length,
+	const Foveation& foveation,
+	const Foveation& prev_foveation,
+	CudaRenderBuffer& render_buffer,
+	bool to_srgb
+) {
+	ivec2 res = {1,1};
+	// vec2 focal_length = calc_focal_length(render_buffer.in_resolution(), relative_focal_length, m_fov_axis, m_zoom);
+	vec2 focal_length = calc_focal_length(res, relative_focal_length, m_fov_axis, m_zoom);
+	vec2 screen_center = render_screen_center(orig_screen_center);
+
+	render_buffer.set_color_space(m_color_space);
+	render_buffer.set_tonemap_curve(m_tonemap_curve);
+
+	Lens lens = (m_testbed_mode == ETestbedMode::Nerf && m_nerf.render_with_lens_distortion) ? m_nerf.render_lens : Lens{};
+
+	// Prepare DLSS data: motion vectors, scaled depth, exposure
+	if (render_buffer.dlss()) {
+		// auto res = render_buffer.in_resolution();
+
+		// const dim3 threads = { 16, 8, 1 };
+		// const dim3 blocks = { div_round_up((uint32_t)res.x, threads.x), div_round_up((uint32_t)res.y, threads.y), 1 };
+
+		// dlss_prep_kernel<<<blocks, threads, 0, stream>>>(
+		// 	res,
+		// 	render_buffer.spp(),
+		// 	focal_length,
+		// 	screen_center,
+		// 	m_parallax_shift,
+		// 	m_snap_to_pixel_centers,
+		// 	render_buffer.depth_buffer(),
+		// 	m_ndc_znear,
+		// 	m_ndc_zfar,
+		// 	camera_matrix0,
+		// 	prev_camera_matrix,
+		// 	render_buffer.dlss()->depth(),
+		// 	render_buffer.dlss()->mvec(),
+		// 	render_buffer.dlss()->exposure(),
+		// 	foveation,
+		// 	prev_foveation,
+		// 	lens
+		// );
+
+		// render_buffer.set_dlss_sharpening(m_dlss_sharpening);
+	}
+
+	EColorSpace output_color_space = to_srgb ? EColorSpace::SRGB : EColorSpace::Linear;
+
+	if (m_render_transparency_as_checkerboard) {
+		mat4x3 checkerboard_transform = mat4x3::identity();
+
+#ifdef NGP_GUI
+		if (m_hmd && m_vr_frame_info && !m_vr_frame_info->views.empty()) {
+			checkerboard_transform = m_vr_frame_info->views[0].pose;
+		}
+#endif
+
+		auto res = render_buffer.in_resolution();
+		const dim3 threads = { 16, 8, 1 };
+		const dim3 blocks = { div_round_up((uint32_t)res.x, threads.x), div_round_up((uint32_t)res.y, threads.y), 1 };
+		spherical_checkerboard_kernel<<<blocks, threads, 0, stream>>>(
+			res,
+			focal_length,
+			checkerboard_transform,
+			screen_center,
+			m_parallax_shift,
+			foveation,
+			lens,
+			m_background_color,
+			render_buffer.frame_buffer()
+		);
+	}
+
+	render_buffer.accumulate(m_exposure, stream);
+	render_buffer.tonemap(m_exposure, m_background_color, output_color_space, m_ndc_znear, m_ndc_zfar, m_snap_to_pixel_centers, stream);
+
+	if (m_testbed_mode == ETestbedMode::Nerf) {
+		// Overlay the ground truth image if requested
+		if (m_render_ground_truth) {
+			auto const& metadata = m_nerf.training.dataset.metadata[m_nerf.training.view];
+			if (m_ground_truth_render_mode == EGroundTruthRenderMode::Shade) {
+				render_buffer.overlay_image(
+					m_ground_truth_alpha,
+					vec3(m_exposure) + m_nerf.training.cam_exposure[m_nerf.training.view].variable(),
+					m_background_color,
+					output_color_space,
+					metadata.pixels,
+					metadata.image_data_type,
+					metadata.resolution,
+					m_fov_axis,
+					m_zoom,
+					vec2(0.5f),
+					stream
+				);
+			} else if (m_ground_truth_render_mode == EGroundTruthRenderMode::Depth && metadata.depth) {
+				render_buffer.overlay_depth(
+					m_ground_truth_alpha,
+					metadata.depth,
+					1.0f/m_nerf.training.dataset.scale,
+					metadata.resolution,
+					m_fov_axis,
+					m_zoom,
+					vec2(0.5f),
+					stream
+				);
+			}
+		}
+
+		// Visualize the accumulated error map if requested
+		if (m_nerf.training.render_error_overlay) {
+			const float* err_data = m_nerf.training.error_map.data.data();
+			ivec2 error_map_res = m_nerf.training.error_map.resolution;
+			if (m_render_ground_truth) {
+				err_data = m_nerf.training.dataset.sharpness_data.data();
+				error_map_res = m_nerf.training.dataset.sharpness_resolution;
+			}
+			size_t emap_size = error_map_res.x * error_map_res.y;
+			err_data += emap_size * m_nerf.training.view;
+
+			GPUMemory<float> average_error;
+			average_error.enlarge(1);
+			average_error.memset(0);
+			const float* aligned_err_data_s = (const float*)(((size_t)err_data)&~15);
+			const float* aligned_err_data_e = (const float*)(((size_t)(err_data+emap_size))&~15);
+			size_t reduce_size = aligned_err_data_e - aligned_err_data_s;
+			reduce_sum(aligned_err_data_s, [reduce_size] __device__ (float val) { return max(val,0.f) / (reduce_size); }, average_error.data(), reduce_size, stream);
+			auto const &metadata = m_nerf.training.dataset.metadata[m_nerf.training.view];
+			render_buffer.overlay_false_color(metadata.resolution, to_srgb, m_fov_axis, stream, err_data, error_map_res, average_error.data(), m_nerf.training.error_overlay_brightness, m_render_ground_truth);
+		}
+	}
+
+#ifdef NGP_GUI
+	// If in VR, indicate the hand position and render transparent background
+	// if (m_hmd && m_vr_frame_info) {
+	// 	auto& hands = m_vr_frame_info->hands;
+
+	// 	auto res = render_buffer.out_resolution();
+	// 	const dim3 threads = { 16, 8, 1 };
+	// 	const dim3 blocks = { div_round_up((uint32_t)res.x, threads.x), div_round_up((uint32_t)res.y, threads.y), 1 };
+	// 	vr_overlay_hands_kernel<<<blocks, threads, 0, stream>>>(
+	// 		res,
+	// 		focal_length * vec2(render_buffer.out_resolution()) / vec2(render_buffer.in_resolution()),
+	// 		camera_matrix0,
+	// 		screen_center,
+	// 		m_parallax_shift,
+	// 		foveation,
+	// 		lens,
+	// 		vr_to_world(hands[0].pose[3]),
+	// 		hands[0].grab_strength,
+	// 		{hands[0].pressing ? 0.8f : 0.0f, 0.0f, 0.0f, 0.8f},
+	// 		vr_to_world(hands[1].pose[3]),
+	// 		hands[1].grab_strength,
+	// 		{hands[1].pressing ? 0.8f : 0.0f, 0.0f, 0.0f, 0.8f},
+	// 		0.05f * m_scale, // Hand radius
+	// 		output_color_space,
+	// 		render_buffer.surface()
+	// 	);
+	// }
+#endif
+}
+
 
 float Testbed::get_depth_from_renderbuffer(const CudaRenderBuffer& render_buffer, const vec2& uv) {
 	if (!render_buffer.depth_buffer()) {

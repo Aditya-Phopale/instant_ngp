@@ -200,6 +200,77 @@ py::array_t<float> Testbed::render_to_cpu(int width, int height, int spp, bool l
 	return result;
 }
 
+py::array_t<float> Testbed::render_to_cpu_parallel(int width, int height, int spp, bool linear, const std::vector<mat4x3>& vec_matrix, float start_time, float end_time, float fps, float shutter_fraction) {
+	m_windowless_render_surface.resize({width, height});
+	m_windowless_render_surface.reset_accumulation();
+
+	// if (from_mitsuba) {
+	// 	result[0] *= -1.0f;
+	// 	result[2] *= -1.0f;
+	// } else {
+	// 	// Cycle axes xyz<-yzx
+	// 	vec4 tmp = row(result, 0);
+	// 	result = row(result, 0, row(result, 1));
+	// 	result = row(result, 1, row(result, 2));
+	// 	result = row(result, 2, tmp);
+	// }
+
+	std::vector<mat4x3> start_cam_matrix(vec_matrix.size());
+    std::vector<mat4x3> end_cam_matrix(vec_matrix.size());
+
+	for (size_t i = 0; i < vec_matrix.size(); ++i) {
+        start_cam_matrix[i] = set_nerf_camera_matrix_copy(vec_matrix[i]);
+		end_cam_matrix[i] = start_cam_matrix[i];
+        
+    }
+	// bool path_animation_enabled = start_time >= 0.f;
+	// if (!path_animation_enabled) { // the old code disabled camera smoothing for non-path renders; so we preserve that behaviour
+	// 	m_smoothed_camera = m_camera;
+	// }
+
+
+	// auto start_cam_matrix = m_smoothed_camera;
+
+	// auto end_cam_matrix = m_smoothed_camera;
+	auto prev_camera_matrix = start_cam_matrix;
+
+	for (int i = 0; i < spp; ++i) {
+
+		auto sample_start_cam_matrix = start_cam_matrix;
+		auto sample_end_cam_matrix = start_cam_matrix;
+
+		if (i == 0) {
+			prev_camera_matrix = sample_start_cam_matrix;
+		}
+
+		render_frame_parallel(
+			m_stream.get(),
+			sample_start_cam_matrix,
+			sample_end_cam_matrix,
+			prev_camera_matrix,
+			m_screen_center,
+			m_relative_focal_length,
+			{0.0f, 0.0f, 0.0f, 1.0f},
+			{},
+			{},
+			m_visualized_dimension,
+			m_windowless_render_surface,
+			!linear
+		);
+		prev_camera_matrix = sample_start_cam_matrix;
+	}
+
+	// For cam smoothing when rendering the next frame.
+	// m_smoothed_camera = end_cam_matrix;
+
+	py::array_t<float> result({height, width, 4});
+	py::buffer_info buf = result.request();
+
+	CUDA_CHECK_THROW(cudaMemcpy2DFromArray(buf.ptr, width * sizeof(float) * 4, m_windowless_render_surface.surface_provider().array(), 0, 0, width * sizeof(float) * 4, height, cudaMemcpyDeviceToHost));
+	return result;
+}
+
+
 py::array_t<float> Testbed::view(bool linear, size_t view_idx) const {
 	if (m_views.size() <= view_idx) {
 		throw std::runtime_error{fmt::format("View #{} does not exist.", view_idx)};
@@ -417,6 +488,17 @@ PYBIND11_MODULE(pyngp, m) {
 			py::arg("height") = 1080,
 			py::arg("spp") = 1,
 			py::arg("linear") = true,
+			py::arg("start_t") = -1.f,
+			py::arg("end_t") = -1.f,
+			py::arg("fps") = 30.f,
+			py::arg("shutter_fraction") = 1.0f
+		)
+		.def("render_parallel", &Testbed::render_to_cpu_parallel, "Renders an image at the requested resolution. Does not require a window.",
+			py::arg("width") = 512,
+			py::arg("height") = 512,
+			py::arg("spp") = 1,
+			py::arg("linear") = true,
+			py::arg("matrix"), 
 			py::arg("start_t") = -1.f,
 			py::arg("end_t") = -1.f,
 			py::arg("fps") = 30.f,

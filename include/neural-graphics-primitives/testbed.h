@@ -176,6 +176,38 @@ public:
 			cudaStream_t stream
 		);
 
+		void init_rays_from_camera(
+			uint32_t spp,
+			uint32_t padded_output_width,
+			uint32_t n_extra_dims,
+			const ivec2& resolution,
+			const vec2& focal_length,
+			const std::vector<mat4x3>& camera_matrix0,
+			const std::vector<mat4x3>& camera_matrix1,
+			const vec4& rolling_shutter,
+			const vec2& screen_center,
+			const vec3& parallax_shift,
+			bool snap_to_pixel_centers,
+			const BoundingBox& render_aabb,
+			const mat3& render_aabb_to_local,
+			float near_distance,
+			float plane_z,
+			float aperture_size,
+			const Foveation& foveation,
+			const Lens& lens,
+			const Buffer2DView<const vec4>& envmap,
+			const Buffer2DView<const vec2>& distortion,
+			vec4* frame_buffer,
+			float* depth_buffer,
+			const Buffer2DView<const uint8_t>& hidden_area_mask,
+			const uint8_t* grid,
+			int show_accel,
+			uint32_t max_mip,
+			float cone_angle_constant,
+			ERenderMode render_mode,
+			cudaStream_t stream
+		);
+
 		uint32_t trace(
 			const std::shared_ptr<NerfNetwork<network_precision_t>>& network,
 			const BoundingBox& render_aabb,
@@ -186,6 +218,29 @@ public:
 			const uint8_t* grid,
 			ERenderMode render_mode,
 			const mat4x3 &camera_matrix,
+			float depth_scale,
+			int visualized_layer,
+			int visualized_dim,
+			ENerfActivation rgb_activation,
+			ENerfActivation density_activation,
+			int show_accel,
+			uint32_t max_mip,
+			float min_transmittance,
+			float glow_y_cutoff,
+			int glow_mode,
+			const float* extra_dims_gpu,
+			cudaStream_t stream
+		);
+		uint32_t trace(
+			const std::shared_ptr<NerfNetwork<network_precision_t>>& network,
+			const BoundingBox& render_aabb,
+			const mat3& render_aabb_to_local,
+			const BoundingBox& train_aabb,
+			const vec2& focal_length,
+			float cone_angle_constant,
+			const uint8_t* grid,
+			ERenderMode render_mode,
+			const std::vector<mat4x3> &camera_matrix,
 			float depth_scale,
 			int visualized_layer,
 			int visualized_dim,
@@ -292,6 +347,20 @@ public:
 		const Foveation& foveation,
 		int visualized_dimension
 	);
+	void render_nerf(
+		cudaStream_t stream,
+		CudaDevice& device,
+		const CudaRenderBufferView& render_buffer,
+		const std::shared_ptr<NerfNetwork<network_precision_t>>& nerf_network,
+		const uint8_t* density_grid_bitfield,
+		const vec2& focal_length,
+		const std::vector<mat4x3>& camera_matrix0,
+		const std::vector<mat4x3>& camera_matrix1,
+		const vec4& rolling_shutter,
+		const vec2& screen_center,
+		const Foveation& foveation,
+		int visualized_dimension
+	);
 	void render_sdf(
 		cudaStream_t stream,
 		const distance_fun_t& distance_function,
@@ -336,6 +405,22 @@ public:
 		bool to_srgb = true,
 		CudaDevice* device = nullptr
 	);
+	void render_frame_parallel(
+		cudaStream_t stream,
+		const std::vector<mat4x3>& camera_matrix0,
+		const std::vector<mat4x3>& camera_matrix1,
+		const std::vector<mat4x3>& prev_camera_matrix,
+		const vec2& screen_center,
+		const vec2& relative_focal_length,
+		const vec4& nerf_rolling_shutter,
+		const Foveation& foveation,
+		const Foveation& prev_foveation,
+		int visualized_dimension,
+		CudaRenderBuffer& render_buffer,
+		bool to_srgb = true,
+		CudaDevice* device = nullptr
+	);
+
 	void render_frame_main(
 		CudaDevice& device,
 		const mat4x3& camera_matrix0,
@@ -346,6 +431,18 @@ public:
 		const Foveation& foveation,
 		int visualized_dimension
 	);
+
+	void render_frame_main(
+		CudaDevice& device,
+		const std::vector<mat4x3>& camera_matrix0,
+		const std::vector<mat4x3>& camera_matrix1,
+		const vec2& screen_center,
+		const vec2& relative_focal_length,
+		const vec4& nerf_rolling_shutter,
+		const Foveation& foveation,
+		int visualized_dimension
+	);
+
 	void render_frame_epilogue(
 		cudaStream_t stream,
 		const mat4x3& camera_matrix0,
@@ -357,6 +454,19 @@ public:
 		CudaRenderBuffer& render_buffer,
 		bool to_srgb = true
 	);
+
+	void render_frame_epilogue(
+		cudaStream_t stream,
+		const std::vector<mat4x3>& camera_matrix0,
+		const std::vector<mat4x3>& prev_camera_matrix,
+		const vec2& screen_center,
+		const vec2& relative_focal_length,
+		const Foveation& foveation,
+		const Foveation& prev_foveation,
+		CudaRenderBuffer& render_buffer,
+		bool to_srgb = true
+	);
+
 	void visualize_nerf_cameras(ImDrawList* list, const mat4& world2proj);
 	fs::path find_network_config(const fs::path& network_config_path);
 	nlohmann::json load_network_config(std::istream& stream, bool is_compressed);
@@ -384,6 +494,7 @@ public:
 	void mouse_wheel();
 	void load_file(const fs::path& path);
 	void set_nerf_camera_matrix(const mat4x3& cam);
+	mat4x3 set_nerf_camera_matrix_copy(const mat4x3& cam);
 	vec3 look_at() const;
 	void set_look_at(const vec3& pos);
 	float scale() const { return m_scale; }
@@ -453,6 +564,7 @@ public:
 #ifdef NGP_PYTHON
 	pybind11::dict compute_marching_cubes_mesh(ivec3 res3d = ivec3(128), BoundingBox aabb = BoundingBox{vec3(0.0f), vec3(1.0f)}, float thresh=2.5f);
 	pybind11::array_t<float> render_to_cpu(int width, int height, int spp, bool linear, float start_t, float end_t, float fps, float shutter_fraction);
+	pybind11::array_t<float> render_to_cpu_parallel(int width, int height, int spp, bool linear, const std::vector<mat4x3>& vec_matrix, float start_t, float end_t, float fps, float shutter_fraction);
 	pybind11::array_t<float> view(bool linear, size_t view) const;
 	pybind11::array_t<float> screenshot(bool linear, bool front_buffer) const;
 	void override_sdf_training_data(pybind11::array_t<float> points, pybind11::array_t<float> distances);
